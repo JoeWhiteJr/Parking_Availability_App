@@ -52,6 +52,7 @@ class SearchAnalyzer:
 
         self.active_searches: Dict[int, ParkingSearchEvent] = {}
         self.completed_searches: List[ParkingSearchEvent] = []
+        self.parked_vehicle_ids: set = set()  # Track IDs already counted as parked
         self.vehicles_parked = 0
         self.vehicles_failed_search = 0
 
@@ -134,6 +135,17 @@ class SearchAnalyzer:
             # Check if vehicle is in a parking spot
             parked_spot_id = self.check_if_parked(centroid, spots)
 
+            # Skip vehicles already counted as parked — don't re-create search events
+            if track_id in self.parked_vehicle_ids:
+                vehicle.is_parked = True
+                vehicle.parked_spot_id = parked_spot_id
+                vehicle.is_searching = False
+                vehicle.search_duration = 0.0
+                # If the vehicle leaves its spot, allow it to be tracked again
+                if parked_spot_id is None:
+                    self.parked_vehicle_ids.discard(track_id)
+                continue
+
             if track_id not in self.active_searches:
                 # New vehicle - start tracking
                 self.active_searches[track_id] = ParkingSearchEvent(
@@ -150,18 +162,18 @@ class SearchAnalyzer:
             vehicle.search_duration = search_event.search_duration
 
             if parked_spot_id is not None:
-                # Vehicle found parking
-                if search_event.outcome == 'searching':
-                    search_event.outcome = 'parked'
-                    search_event.parked_spot_id = parked_spot_id
-                    search_event.exit_time = current_time
-                    self.vehicles_parked += 1
-                    self.completed_searches.append(search_event)
-                    del self.active_searches[track_id]
-                    self.logger.info(
-                        f"Vehicle {track_id} parked in spot {parked_spot_id} "
-                        f"after {search_event.search_duration:.1f}s"
-                    )
+                # Vehicle found parking — count once, then remember it
+                search_event.outcome = 'parked'
+                search_event.parked_spot_id = parked_spot_id
+                search_event.exit_time = current_time
+                self.vehicles_parked += 1
+                self.completed_searches.append(search_event)
+                del self.active_searches[track_id]
+                self.parked_vehicle_ids.add(track_id)
+                self.logger.info(
+                    f"Vehicle {track_id} parked in spot {parked_spot_id} "
+                    f"after {search_event.search_duration:.1f}s"
+                )
 
                 vehicle.is_parked = True
                 vehicle.parked_spot_id = parked_spot_id
@@ -187,6 +199,9 @@ class SearchAnalyzer:
 
         # Check for disappeared vehicles (left frame without parking)
         self._handle_disappeared_vehicles(active_track_ids, current_time)
+
+        # Clean up parked IDs for vehicles no longer tracked
+        self.parked_vehicle_ids = self.parked_vehicle_ids & active_track_ids
 
         return {
             'active_searches': len(self.active_searches),
@@ -281,5 +296,6 @@ class SearchAnalyzer:
         """Reset analyzer state"""
         self.active_searches = {}
         self.completed_searches = []
+        self.parked_vehicle_ids = set()
         self.vehicles_parked = 0
         self.vehicles_failed_search = 0

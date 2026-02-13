@@ -18,6 +18,7 @@ import logging
 from car_detector import CarDetector
 from vehicle_tracker import VehicleTracker, TrackedVehicle
 from search_analyzer import SearchAnalyzer
+from spot_occupancy import SpotOccupancyChecker
 
 
 class ParkingMonitor:
@@ -80,6 +81,12 @@ class ParkingMonitor:
             alert_threshold=20.0      # Warning after 20 seconds
         )
 
+        # Spot-based occupancy checker (image analysis per spot)
+        self.spot_checker = SpotOccupancyChecker()
+
+        # ROI for restricting detection to parking lot area (computed after loading spots)
+        self.detection_roi = None
+
         # Tracking statistics
         self.tracking_stats = {
             'total_vehicles': 0,
@@ -110,6 +117,21 @@ class ParkingMonitor:
                 spot['confidence'] = 0.0
 
             self.logger.info(f"Loaded {len(self.spots)} parking spots from {self.spots_config}")
+
+            # Compute detection ROI from spot bounding box
+            # This restricts YOLO detection to the parking lot area only,
+            # excluding the main road and other irrelevant regions.
+            all_x = [p[0] for s in self.spots for p in s['points']]
+            all_y = [p[1] for s in self.spots for p in s['points']]
+            padding = 150  # Extra pixels around spots
+            # We don't know frame shape yet, use a large upper bound
+            self.detection_roi = (
+                max(0, min(all_x) - padding),
+                max(0, min(all_y) - padding),
+                max(all_x) + padding,
+                max(all_y) + padding,
+            )
+            self.logger.info(f"Detection ROI: {self.detection_roi}")
 
             # Log spot types
             spot_types = {}
@@ -224,44 +246,57 @@ class ParkingMonitor:
 
     def check_spot_occupancy(self, frame: np.ndarray, detections: List[Dict]) -> None:
         """
-        Check occupancy status for each parking spot
+        Check occupancy status for each parking spot using a hybrid approach:
+        1. YOLO object detections (car center inside spot polygon)
+        2. Spot-based image analysis (edge density + color variance)
+        A spot is occupied if EITHER method says so.
 
         Args:
             frame: Current video frame
             detections: List of car detections from car detector
         """
-        # Detect orange cones
-        orange_cones = self.detect_orange_cones(frame)
-
+        # --- Method 1: YOLO detection overlap ---
+        yolo_occupied = {}
         for spot in self.spots:
             spot_polygon = [(p[0], p[1]) for p in spot['points']]
-            spot_occupied = False
-            max_confidence = 0.0
+            yolo_occupied[spot['id']] = {'occupied': False, 'confidence': 0.0}
 
-            # Check for car detections in this spot
             for detection in detections:
                 bbox = detection['bbox']
-                confidence = detection['confidence']
-
-                # Calculate center of bounding box
                 center_x = bbox[0] + bbox[2] // 2
                 center_y = bbox[1] + bbox[3] // 2
-
-                # Check if car center is in parking spot
                 if self.point_in_polygon((center_x, center_y), spot_polygon):
-                    spot_occupied = True
-                    max_confidence = max(max_confidence, confidence)
+                    yolo_occupied[spot['id']]['occupied'] = True
+                    yolo_occupied[spot['id']]['confidence'] = max(
+                        yolo_occupied[spot['id']]['confidence'], detection['confidence']
+                    )
 
-            # Check for orange cones in this spot
-            for cone_x, cone_y in orange_cones:
-                if self.point_in_polygon((cone_x, cone_y), spot_polygon):
-                    spot_occupied = True
-                    max_confidence = max(max_confidence, 0.8)  # High confidence for cone detection
+        # --- Method 2: Spot-based image analysis ---
+        spot_results = self.spot_checker.check_spots(frame, self.spots)
+        spot_analysis = {r['spot_id']: r for r in spot_results}
 
-            # Update spot status
-            spot['occupied'] = spot_occupied
-            spot['confidence'] = max_confidence
-            if spot_occupied:
+        # --- Combine: occupied if either method detects a car ---
+        for spot in self.spots:
+            sid = spot['id']
+            yolo_hit = yolo_occupied.get(sid, {}).get('occupied', False)
+            yolo_conf = yolo_occupied.get(sid, {}).get('confidence', 0.0)
+
+            analysis = spot_analysis.get(sid, {})
+            analysis_hit = analysis.get('occupied', False)
+            analysis_conf = analysis.get('confidence', 0.0)
+
+            occupied = yolo_hit or analysis_hit
+
+            if yolo_hit:
+                confidence = yolo_conf
+            elif analysis_hit:
+                confidence = analysis_conf * 0.8  # slightly lower confidence for image analysis
+            else:
+                confidence = 0.0
+
+            spot['occupied'] = occupied
+            spot['confidence'] = confidence
+            if occupied:
                 spot['last_detection_time'] = time.time()
 
         # Calculate total occupancy
@@ -601,9 +636,6 @@ class ParkingMonitor:
         if not self.load_spots_config() or not self.load_video():
             return
 
-        # Initialize car detector
-        self.car_detector.use_opencv_dnn()
-
         self.logger.info("Starting parking lot monitoring...")
         self.logger.info(f"Monitoring {self.total_spots} parking spots")
 
@@ -642,9 +674,9 @@ class ParkingMonitor:
                 # Calculate current video time
                 video_time = self.frame_count / fps
 
-                # Detect cars in frame (both formats)
-                detections = self.car_detector.detect_cars(frame)
-                tracker_detections = self.car_detector.detect_cars_for_tracker(frame)
+                # Detect cars in frame (both formats), restricted to parking lot ROI
+                detections = self.car_detector.detect_cars(frame, roi=self.detection_roi)
+                tracker_detections = self.car_detector.detect_cars_for_tracker(frame, roi=self.detection_roi)
 
                 # Update vehicle tracker
                 self.tracked_vehicles = self.vehicle_tracker.update(tracker_detections)

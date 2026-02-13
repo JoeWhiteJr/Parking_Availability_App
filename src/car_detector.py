@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Car Detection System for Parking Lot Monitoring
-Uses YOLO object detection to identify cars in parking lot footage.
+Uses YOLOv8 object detection to identify cars in parking lot footage.
+Falls back to basic contour analysis if ultralytics is unavailable.
 """
 
 import cv2
@@ -11,211 +12,240 @@ import os
 
 
 class CarDetector:
-    def __init__(self, model_path: str = None):
+    def __init__(self, model_path: str = None, confidence_threshold: float = 0.3):
         """
-        Initialize car detector with YOLO model
+        Initialize car detector with YOLOv8 model
 
         Args:
-            model_path: Path to YOLO model weights (optional)
+            model_path: Path to YOLO model weights (optional, defaults to yolov8n.pt)
+            confidence_threshold: Minimum confidence for detections
         """
-        self.model_path = model_path
-        self.net = None
-        self.output_layers = None
-        self.classes = None
-
-        # COCO class names (YOLO was trained on COCO dataset)
-        self.coco_classes = [
-            "person", "bicycle", "car", "motorcycle", "airplane", "bus",
-            "train", "truck", "boat", "traffic light", "fire hydrant",
-            "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-            "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
-            "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-            "skis", "snowboard", "sports ball", "kite", "baseball bat",
-            "baseball glove", "skateboard", "surfboard", "tennis racket",
-            "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
-            "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-            "hot dog", "pizza", "donut", "cake", "chair", "couch",
-            "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
-            "mouse", "remote", "keyboard", "cell phone", "microwave",
-            "oven", "toaster", "sink", "refrigerator", "book", "clock",
-            "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-        ]
-
-        # Vehicle class IDs from COCO dataset
-        self.vehicle_classes = [2, 3, 5, 7]  # car, motorcycle, bus, truck
-
-        self.confidence_threshold = 0.5
+        self.model_path = model_path or "yolov8n.pt"
+        self.yolo_model = None
+        self.confidence_threshold = confidence_threshold
         self.nms_threshold = 0.4
 
-    def load_model(self, weights_path: str, config_path: str):
-        """
-        Load YOLO model from weights and config files
+        # COCO vehicle class IDs
+        self.vehicle_classes = [2, 3, 5, 7]  # car, motorcycle, bus, truck
+        self.vehicle_class_names = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
-        Args:
-            weights_path: Path to YOLO weights file
-            config_path: Path to YOLO config file
-        """
+        # Try to load YOLOv8
+        self._load_yolov8()
+
+    def _load_yolov8(self):
+        """Attempt to load YOLOv8 model via ultralytics."""
         try:
-            self.net = cv2.dnn.readNet(weights_path, config_path)
-            layer_names = self.net.getLayerNames()
-            self.output_layers = [layer_names[i[0] - 1] for i in self.net.getUnconnectedOutLayers()]
-            print(f"✅ YOLO model loaded successfully")
-            return True
+            from ultralytics import YOLO
+            self.yolo_model = YOLO(self.model_path)
+            print(f"YOLOv8 model loaded: {self.model_path}")
+        except ImportError:
+            print("ultralytics not installed — falling back to basic contour detection")
+            self.yolo_model = None
         except Exception as e:
-            print(f"❌ Error loading YOLO model: {str(e)}")
-            return False
+            print(f"Failed to load YOLOv8 model: {e} — falling back to basic detection")
+            self.yolo_model = None
 
-    def use_opencv_dnn(self):
+    def detect_cars(self, frame: np.ndarray,
+                    roi: tuple = None) -> List[Dict]:
         """
-        Use OpenCV's built-in DNN module with pre-trained model
-        This is a fallback when YOLO weights are not available
-        """
-        print("📦 Using OpenCV DNN with MobileNet-SSD model...")
+        Detect cars in the given frame using tiled (SAHI-style) inference.
 
-        # This would typically load a pre-trained model
-        # For now, we'll create a placeholder that can detect basic shapes
-        self.net = "opencv_dnn"
-        return True
-
-    def detect_cars_basic(self, frame: np.ndarray) -> List[Dict]:
-        """
-        Basic car detection using background subtraction and contours
-        This is a fallback method when YOLO is not available
+        Slices the frame into overlapping tiles, runs YOLOv8 on each,
+        then merges results with NMS. Falls back to basic detection if
+        YOLOv8 is unavailable.
 
         Args:
-            frame: Input image frame
+            frame: Input image frame (BGR)
+            roi: Optional (x1, y1, x2, y2) to restrict detection to a region.
+                 Detections are returned in full-frame coordinates.
 
         Returns:
-            List of detection dictionaries with bounding boxes and confidence
+            List of detection dicts with keys: bbox [x, y, w, h], confidence, class
         """
+        if self.yolo_model is not None:
+            return self._detect_tiled(frame, roi=roi)
+        return self._detect_basic(frame, roi=roi)
+
+    def _detect_yolov8(self, frame: np.ndarray) -> List[Dict]:
+        """Run YOLOv8 inference on a single image and return vehicle detections."""
+        results = self.yolo_model(frame, conf=self.confidence_threshold, verbose=False)
+
         detections = []
-
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (21, 21), 0)
-
-        # Apply threshold to get binary image
-        _, thresh = cv2.threshold(blurred, 60, 255, cv2.THRESH_BINARY)
-
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Filter contours by area (cars should be within certain size range)
-        for contour in contours:
-            area = cv2.contourArea(contour)
-
-            # Filter by area - adjust these values based on your camera angle
-            if 1000 < area < 10000:
-                x, y, w, h = cv2.boundingRect(contour)
-
-                # Filter by aspect ratio (cars are typically wider than tall)
-                aspect_ratio = w / h
-                if 1.2 < aspect_ratio < 3.0:
-                    detections.append({
-                        'bbox': [x, y, w, h],
-                        'confidence': 0.6,  # Fixed confidence for basic detection
-                        'class': 'car'
-                    })
-
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            for i in range(len(boxes)):
+                cls_id = int(boxes.cls[i].item())
+                if cls_id not in self.vehicle_classes:
+                    continue
+                conf = float(boxes.conf[i].item())
+                x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+                w = x2 - x1
+                h = y2 - y1
+                detections.append({
+                    'bbox': [int(x1), int(y1), int(w), int(h)],
+                    'confidence': conf,
+                    'class': self.vehicle_class_names.get(cls_id, "vehicle"),
+                })
         return detections
 
-    def detect_cars(self, frame: np.ndarray) -> List[Dict]:
+    def _detect_tiled(self, frame: np.ndarray,
+                      tile_size: int = 640,
+                      overlap: float = 0.25,
+                      roi: tuple = None) -> List[Dict]:
         """
-        Detect cars in the given frame
+        SAHI-style tiled detection: slice the frame into overlapping tiles,
+        run YOLOv8 on each tile, offset bboxes back to full-frame coords,
+        then apply NMS to remove duplicates.
 
         Args:
-            frame: Input image frame
-
-        Returns:
-            List of detection dictionaries with bounding boxes, confidence, and class
+            frame: Full input frame
+            tile_size: Size of each square tile
+            overlap: Fraction of overlap between adjacent tiles
+            roi: Optional (x1, y1, x2, y2) to restrict tiling to a sub-region.
+                 Returned bboxes are in full-frame coordinates.
         """
-        if self.net is None:
-            # Use basic detection as fallback
-            return self.detect_cars_basic(frame)
+        h, w = frame.shape[:2]
+        stride = int(tile_size * (1 - overlap))
 
-        if self.net == "opencv_dnn":
-            # Use basic detection method
-            return self.detect_cars_basic(frame)
+        # Determine the region to tile over
+        if roi is not None:
+            rx1, ry1, rx2, ry2 = roi
+            rx1 = max(0, rx1)
+            ry1 = max(0, ry1)
+            rx2 = min(w, rx2)
+            ry2 = min(h, ry2)
+            region = frame[ry1:ry2, rx1:rx2]
+        else:
+            rx1, ry1 = 0, 0
+            region = frame
 
-        # YOLO detection (when model is available)
-        height, width, channels = frame.shape
+        rh, rw = region.shape[:2]
 
-        # Create blob from image
-        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-        self.net.setInput(blob)
-        outputs = self.net.forward(self.output_layers)
+        all_boxes = []   # [x1, y1, x2, y2] in full-frame coords
+        all_confs = []
+        all_classes = []
 
-        # Extract bounding boxes, confidence scores, and class IDs
-        boxes = []
-        confidences = []
-        class_ids = []
+        # Run on the full ROI region (downscaled by YOLO internally) to catch large cars
+        region_dets = self._detect_yolov8(region)
+        for d in region_dets:
+            bx, by, bw, bh = d['bbox']
+            all_boxes.append([bx + rx1, by + ry1, bx + rx1 + bw, by + ry1 + bh])
+            all_confs.append(d['confidence'])
+            all_classes.append(d['class'])
 
-        for output in outputs:
-            for detection in output:
-                scores = detection[5:]
-                class_id = np.argmax(scores)
-                confidence = scores[class_id]
+        # Tile across the region
+        for y0 in range(0, rh, stride):
+            for x0 in range(0, rw, stride):
+                x1 = min(x0, rw - tile_size) if x0 + tile_size > rw else x0
+                y1 = min(y0, rh - tile_size) if y0 + tile_size > rh else y0
+                x2 = min(x1 + tile_size, rw)
+                y2 = min(y1 + tile_size, rh)
 
-                # Only consider vehicle classes
-                if class_id in self.vehicle_classes and confidence > self.confidence_threshold:
-                    center_x = int(detection[0] * width)
-                    center_y = int(detection[1] * height)
-                    w = int(detection[2] * width)
-                    h = int(detection[3] * height)
+                if x2 - x1 < 100 or y2 - y1 < 100:
+                    continue  # Skip tiny edge tiles
 
-                    # Rectangle coordinates
-                    x = int(center_x - w / 2)
-                    y = int(center_y - h / 2)
+                tile = region[y1:y2, x1:x2]
+                tile_dets = self._detect_yolov8(tile)
 
-                    boxes.append([x, y, w, h])
-                    confidences.append(float(confidence))
-                    class_ids.append(class_id)
+                for d in tile_dets:
+                    bx, by, bw, bh = d['bbox']
+                    # Offset to full-frame coordinates
+                    fx = bx + x1 + rx1
+                    fy = by + y1 + ry1
+                    all_boxes.append([fx, fy, fx + bw, fy + bh])
+                    all_confs.append(d['confidence'])
+                    all_classes.append(d['class'])
 
-        # Apply Non-Maximum Suppression
-        indexes = cv2.dnn.NMSBoxes(boxes, confidences, self.confidence_threshold, self.nms_threshold)
+        if not all_boxes:
+            return []
+
+        # Apply NMS to merge overlapping detections from different tiles
+        boxes_arr = np.array(all_boxes, dtype=np.float32)
+        confs_arr = np.array(all_confs, dtype=np.float32)
+
+        indices = cv2.dnn.NMSBoxes(
+            boxes_arr.tolist(),
+            confs_arr.tolist(),
+            self.confidence_threshold,
+            self.nms_threshold,
+        )
 
         detections = []
-        if len(indexes) > 0:
-            for i in indexes.flatten():
+        if len(indices) > 0:
+            for i in indices.flatten():
+                x1, y1, x2, y2 = all_boxes[i]
                 detections.append({
-                    'bbox': boxes[i],
-                    'confidence': confidences[i],
-                    'class': self.coco_classes[class_ids[i]]
+                    'bbox': [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+                    'confidence': float(all_confs[i]),
+                    'class': all_classes[i],
                 })
 
         return detections
 
-    def detect_cars_for_tracker(self, frame: np.ndarray) -> np.ndarray:
+    def _detect_basic(self, frame: np.ndarray, roi: tuple = None) -> List[Dict]:
+        """
+        Basic car detection using contour analysis.
+        This is a last-resort fallback when YOLOv8 is unavailable.
+
+        Area thresholds are sized for high-res video (~3840x2160 or similar).
+        """
+        if roi is not None:
+            rx1, ry1, rx2, ry2 = roi
+            region = frame[ry1:ry2, rx1:rx2]
+        else:
+            rx1, ry1 = 0, 0
+            region = frame
+
+        detections = []
+
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (21, 21), 0)
+        _, thresh = cv2.threshold(blurred, 60, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if 5000 < area < 200000:
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / h if h > 0 else 0
+                if 0.8 < aspect_ratio < 3.5:
+                    detections.append({
+                        'bbox': [x + rx1, y + ry1, w, h],
+                        'confidence': 0.4,
+                        'class': 'car',
+                    })
+        return detections
+
+    def detect_cars_for_tracker(self, frame: np.ndarray,
+                               roi: tuple = None) -> np.ndarray:
         """
         Detect cars and return in format suitable for SORT tracker.
 
         Args:
             frame: Input image frame
+            roi: Optional (x1, y1, x2, y2) to restrict detection region
 
         Returns:
             numpy array of shape (N, 5) where each row is [x1, y1, x2, y2, confidence]
-            x1, y1 = top-left corner; x2, y2 = bottom-right corner
         """
-        detections = self.detect_cars(frame)
+        detections = self.detect_cars(frame, roi=roi)
 
         if not detections:
             return np.empty((0, 5))
 
-        # Convert to [x1, y1, x2, y2, confidence] format
         tracker_detections = []
         for det in detections:
             x, y, w, h = det['bbox']
             confidence = det['confidence']
-            # Convert from [x, y, w, h] to [x1, y1, x2, y2, confidence]
             tracker_detections.append([x, y, x + w, y + h, confidence])
 
         return np.array(tracker_detections)
 
     def draw_detections(self, frame: np.ndarray, detections: List[Dict]) -> np.ndarray:
         """
-        Draw detection bounding boxes on frame
+        Draw detection bounding boxes on frame.
 
         Args:
             frame: Input image frame
@@ -229,10 +259,7 @@ class CarDetector:
             confidence = detection['confidence']
             class_name = detection['class']
 
-            # Draw bounding box
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-            # Draw label
             label = f"{class_name}: {confidence:.2f}"
             cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
@@ -241,16 +268,17 @@ class CarDetector:
 
 def main():
     """Test the car detection system"""
-    print("🚗 Car Detection System Test")
+    print("Car Detection System Test")
     print("=" * 30)
 
     detector = CarDetector()
 
-    # Use basic detection method for testing
-    detector.use_opencv_dnn()
+    if detector.yolo_model is not None:
+        print("Using YOLOv8 detection")
+    else:
+        print("Using basic contour detection (fallback)")
 
-    print("✅ Car detector initialized")
-    print("📹 Ready to process video frames")
+    print("Ready to process video frames")
     print("\nTo use this detector:")
     print("1. Load a video frame")
     print("2. Call detector.detect_cars(frame)")
