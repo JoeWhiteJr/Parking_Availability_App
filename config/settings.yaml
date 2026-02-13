@@ -55,6 +55,26 @@ spot_types:
     color: [128, 128, 128]     # BGR color for reserved spots (gray)
     priority: 3                # Highest priority
 
+# Vehicle Tracking Settings (SORT Algorithm)
+tracking:
+  enabled: true                # Enable vehicle tracking across frames
+  max_age: 30                  # Frames to keep track without detection
+  min_hits: 3                  # Minimum hits before confirming track
+  iou_threshold: 0.3           # IoU threshold for detection-to-track association
+
+# Search Detection Settings (Detect vehicles that fail to find parking)
+search_detection:
+  enabled: true                # Enable "didn't find parking" detection
+  timeout_seconds: 30          # Seconds before marking as failed search
+  min_frames_threshold: 15     # Minimum frames to count as search attempt
+  alert_threshold_seconds: 20  # Seconds before generating warning alert
+
+# Analytics Settings
+analytics:
+  timeline_interval_seconds: 60    # How often to record availability timeline
+  save_search_events: true         # Save individual search event details
+  export_format: "json"            # Output format: json, csv, or both
+
 # Performance Settings
 performance:
   use_gpu: false               # Use GPU acceleration if available

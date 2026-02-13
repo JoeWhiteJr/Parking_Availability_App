@@ -7,6 +7,10 @@ torchvision>=0.15.0
 # Data Processing and Analysis
 numpy>=1.24.0
 pandas>=2.0.0
+scipy>=1.11.0
+
+# Vehicle Tracking (SORT algorithm)
+filterpy>=1.4.5
 matplotlib>=3.7.0
 Pillow>=10.0.0
 

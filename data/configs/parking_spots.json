@@ -1,0 +1,108 @@
+{
+  "video_path": "/home/joe/Parking_App/data/Footage/Parking_30min_data_gathering.mp4",
+  "frame_size": [2160, 3840],
+  "spots": [
+    {
+      "id": 1,
+      "points": [[180, 1650], [310, 1650], [310, 1820], [180, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 2,
+      "points": [[320, 1650], [450, 1650], [450, 1820], [320, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 3,
+      "points": [[460, 1650], [590, 1650], [590, 1820], [460, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 4,
+      "points": [[600, 1650], [730, 1650], [730, 1820], [600, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 5,
+      "points": [[740, 1650], [870, 1650], [870, 1820], [740, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 6,
+      "points": [[880, 1650], [1010, 1650], [1010, 1820], [880, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 7,
+      "points": [[1020, 1650], [1150, 1650], [1150, 1820], [1020, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 8,
+      "points": [[1160, 1650], [1290, 1650], [1290, 1820], [1160, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 9,
+      "points": [[1300, 1650], [1430, 1650], [1430, 1820], [1300, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 10,
+      "points": [[1440, 1650], [1570, 1650], [1570, 1820], [1440, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 11,
+      "points": [[1580, 1650], [1710, 1650], [1710, 1820], [1580, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 12,
+      "points": [[1720, 1650], [1850, 1650], [1850, 1820], [1720, 1820]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 13,
+      "points": [[1350, 2650], [1500, 2650], [1500, 2850], [1350, 2850]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 14,
+      "points": [[1510, 2650], [1660, 2650], [1660, 2850], [1510, 2850]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 15,
+      "points": [[1670, 2650], [1820, 2650], [1820, 2850], [1670, 2850]],
+      "type": "normal",
+      "occupied": false
+    },
+    {
+      "id": 16,
+      "points": [[1830, 2650], [1980, 2650], [1980, 2850], [1830, 2850]],
+      "type": "normal",
+      "occupied": false
+    }
+  ],
+  "total_spots": 16,
+  "spot_types": {
+    "normal": 16,
+    "electric": 0,
+    "reserved": 0
+  }
+}

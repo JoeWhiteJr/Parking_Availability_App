@@ -187,6 +187,32 @@ class CarDetector:
 
         return detections
 
+    def detect_cars_for_tracker(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Detect cars and return in format suitable for SORT tracker.
+
+        Args:
+            frame: Input image frame
+
+        Returns:
+            numpy array of shape (N, 5) where each row is [x1, y1, x2, y2, confidence]
+            x1, y1 = top-left corner; x2, y2 = bottom-right corner
+        """
+        detections = self.detect_cars(frame)
+
+        if not detections:
+            return np.empty((0, 5))
+
+        # Convert to [x1, y1, x2, y2, confidence] format
+        tracker_detections = []
+        for det in detections:
+            x, y, w, h = det['bbox']
+            confidence = det['confidence']
+            # Convert from [x, y, w, h] to [x1, y1, x2, y2, confidence]
+            tracker_detections.append([x, y, x + w, y + h, confidence])
+
+        return np.array(tracker_detections)
+
     def draw_detections(self, frame: np.ndarray, detections: List[Dict]) -> np.ndarray:
         """
         Draw detection bounding boxes on frame
