@@ -625,13 +625,18 @@ class ParkingMonitor:
         except Exception as e:
             self.logger.error(f"Error saving occupancy data: {str(e)}")
 
-    def run(self, save_output: bool = False, display: bool = True) -> None:
+    def run(self, save_output: bool = False, display: bool = True,
+            detect_every: int = 1) -> None:
         """
         Run the parking monitoring system
 
         Args:
             save_output: Whether to save output video
             display: Whether to display video window
+            detect_every: Run detection every N frames. When >1, skips
+                          intermediate frames entirely (seek-based) to avoid
+                          slow per-frame I/O. Output video becomes a timelapse
+                          at 1 frame per detection cycle.
         """
         if not self.load_spots_config() or not self.load_video():
             return
@@ -639,42 +644,59 @@ class ParkingMonitor:
         self.logger.info("Starting parking lot monitoring...")
         self.logger.info(f"Monitoring {self.total_spots} parking spots")
 
+        # Get video properties
+        fps = self.video.get(cv2.CAP_PROP_FPS)
+        total_frames = int(self.video.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if fps <= 0:
+            fps = 30.0
+
         # Setup video writer if saving output
         video_writer = None
+        output_video_path = None
         if save_output:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            fps = self.video.get(cv2.CAP_PROP_FPS)
-            width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = f"output/results/parking_monitor_{timestamp}.mp4"
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            output_video_path = f"output/results/parking_monitor_{timestamp}.mp4"
+            os.makedirs(os.path.dirname(output_video_path), exist_ok=True)
+            # Output at ~10fps timelapse for smooth playback
+            video_writer = cv2.VideoWriter(output_video_path, fourcc, 10.0, (width, height))
+            self.logger.info(f"Saving output to: {output_video_path}")
+
+        if detect_every > 1:
+            num_cycles = total_frames // detect_every
+            self.logger.info(
+                f"Detection every {detect_every} frames "
+                f"({detect_every/fps:.1f}s intervals) — "
+                f"{num_cycles} detection cycles to process"
+            )
 
         if display:
             cv2.namedWindow('Parking Monitor', cv2.WINDOW_NORMAL)
-
-        # Get video FPS for time calculations
-        fps = self.video.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30.0  # Default to 30 fps if not available
 
         # Initialize search status
         search_status = {}
 
         try:
-            while True:
+            frame_num = 0
+            detection_count = 0
+            start_time = time.time()
+
+            while frame_num < total_frames:
+                # Seek to the target frame (skip intermediate frames)
+                if detect_every > 1:
+                    self.video.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+
                 ret, frame = self.video.read()
                 if not ret:
                     break
 
-                self.frame_count += 1
-
-                # Calculate current video time
+                self.frame_count = frame_num + 1
                 video_time = self.frame_count / fps
+                detection_count += 1
 
-                # Detect cars in frame (both formats), restricted to parking lot ROI
+                # Detect cars in frame, restricted to parking lot ROI
                 detections = self.car_detector.detect_cars(frame, roi=self.detection_roi)
                 tracker_detections = self.car_detector.detect_cars_for_tracker(frame, roi=self.detection_roi)
 
@@ -691,8 +713,9 @@ class ParkingMonitor:
                 # Check parking spot occupancy
                 self.check_spot_occupancy(frame, detections)
 
-                # Record availability timeline periodically (every 60 seconds of video)
-                if self.frame_count % int(fps * 60) == 0:
+                # Record availability timeline periodically (every 60s of video)
+                video_minutes = int(video_time / 60)
+                if video_minutes > 0 and abs(video_time - video_minutes * 60) < (detect_every / fps):
                     self.tracking_stats['availability_timeline'].append({
                         'timestamp': datetime.now().isoformat(),
                         'video_time_seconds': video_time,
@@ -701,16 +724,23 @@ class ParkingMonitor:
                         'searching_vehicles': search_status.get('vehicles_currently_searching', 0)
                     })
 
-                # Draw tracked vehicles
+                # Progress logging
+                pct = frame_num / total_frames * 100 if total_frames > 0 else 0
+                elapsed = time.time() - start_time
+                rate = detection_count / elapsed if elapsed > 0 else 0
+                remaining_cycles = (total_frames - frame_num) / detect_every
+                eta_min = remaining_cycles / rate / 60 if rate > 0 else 0
+                self.logger.info(
+                    f"Frame {frame_num}/{total_frames} ({pct:.1f}%) | "
+                    f"t={video_time:.0f}s | "
+                    f"Occupied: {self.occupied_spots}/{self.total_spots} | "
+                    f"ETA: {eta_min:.0f}min"
+                )
+
+                # Draw annotated frame
                 frame_with_tracking = self.draw_tracked_vehicles(frame)
-
-                # Draw parking spots
                 frame_with_spots = self.draw_spots(frame_with_tracking)
-
-                # Draw info panel (right side)
                 frame_with_info = self.draw_info_panel(frame_with_spots)
-
-                # Draw tracking panel (left side)
                 display_frame = self.draw_tracking_panel(frame_with_info, search_status)
 
                 # Save frame if requested
@@ -721,7 +751,7 @@ class ParkingMonitor:
                 if display:
                     cv2.imshow('Parking Monitor', display_frame)
 
-                # Save occupancy data periodically (every 30 seconds)
+                # Save occupancy data periodically
                 current_time = time.time()
                 if current_time - self.last_update_time > 30:
                     self.save_occupancy_data()
@@ -736,10 +766,14 @@ class ParkingMonitor:
                         self.save_occupancy_data()
                         self.logger.info("Manual save triggered")
 
+                # Advance to next detection frame
+                frame_num += detect_every
+
         except KeyboardInterrupt:
             self.logger.info("Monitoring stopped by user")
 
         finally:
+            elapsed = time.time() - start_time if 'start_time' in dir() else 0
             # Cleanup
             if self.video:
                 self.video.release()
@@ -750,7 +784,12 @@ class ParkingMonitor:
 
             # Save final occupancy data
             self.save_occupancy_data()
-            self.logger.info("Parking monitoring session ended")
+            self.logger.info(
+                f"Monitoring complete: {detection_count} frames processed "
+                f"in {elapsed/60:.1f} minutes"
+            )
+            if output_video_path:
+                self.logger.info(f"Output video saved: {output_video_path}")
 
 
 def main():
@@ -760,6 +799,8 @@ def main():
     parser.add_argument("--spots", required=True, help="Path to parking spots configuration JSON")
     parser.add_argument("--save", action="store_true", help="Save output video")
     parser.add_argument("--no-display", action="store_true", help="Run without display (headless mode)")
+    parser.add_argument("--detect-every", type=int, default=30,
+                        help="Run detection every N frames (default: 30 = once per second at 30fps)")
 
     args = parser.parse_args()
 
@@ -769,7 +810,8 @@ def main():
 
     # Initialize and run monitor
     monitor = ParkingMonitor(args.video, args.spots)
-    monitor.run(save_output=args.save, display=not args.no_display)
+    monitor.run(save_output=args.save, display=not args.no_display,
+                detect_every=args.detect_every)
 
 
 if __name__ == "__main__":
